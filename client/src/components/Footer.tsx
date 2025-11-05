@@ -130,7 +130,7 @@ export default function Footer() {
 
         <div className="mt-8 pt-8 border-t border-border text-center">
           <p className="text-sm text-muted-foreground" data-testid="text-copyright">
-            © {new Date().getFullYear()} PropCraft Studio. All rights reserved.
+            © {new Date().getFullYear()} NairoPropUp. All rights reserved.
           </p>
         </div>
       </div>
