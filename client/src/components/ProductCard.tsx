@@ -2,21 +2,43 @@ import { Card, CardContent, CardFooter } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { ShoppingCart } from "lucide-react";
 import type { Product } from "@shared/schema";
+import { useCart } from "@/hooks/useCart";
+import { useToast } from "@/hooks/use-toast";
 
 interface ProductCardProps {
   product: Product;
 }
 
 export default function ProductCard({ product }: ProductCardProps) {
+  const { addItem, isAdding } = useCart();
+  const { toast } = useToast();
+
   const handleAddToCart = () => {
-    console.log("Add to cart:", product.name);
+    addItem(
+      { productId: product.id, quantity: 1 },
+      {
+        onSuccess: () => {
+          toast({
+            title: "Added to cart",
+            description: `${product.name} has been added to your cart.`,
+          });
+        },
+        onError: () => {
+          toast({
+            title: "Error",
+            description: "Failed to add item to cart. Please try again.",
+            variant: "destructive",
+          });
+        },
+      }
+    );
   };
 
   return (
     <Card className="overflow-hidden hover-elevate transition-all group" data-testid={`card-product-${product.id}`}>
       <div className="aspect-square relative overflow-hidden bg-muted">
-        <img 
-          src={product.imageUrl} 
+        <img
+          src={product.imageUrl}
           alt={product.name}
           className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
         />
@@ -36,8 +58,8 @@ export default function ProductCard({ product }: ProductCardProps) {
         </p>
       </CardContent>
       <CardFooter className="p-4 pt-0">
-        <Button 
-          className="w-full" 
+        <Button
+          className="w-full"
           variant="outline"
           onClick={handleAddToCart}
           data-testid={`button-add-to-cart-${product.id}`}

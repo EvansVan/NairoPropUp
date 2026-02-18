@@ -6,6 +6,8 @@ import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import Home from "@/pages/Home";
 import Shop from "@/pages/Shop";
+import Cart from "@/pages/Cart";
+import Checkout from "@/pages/Checkout";
 import PrintOnDemand from "@/pages/PrintOnDemand";
 import NotFound from "@/pages/not-found";
 
@@ -14,6 +16,8 @@ function AppRoutes() {
     <Switch>
       <Route path="/" component={Home} />
       <Route path="/shop" component={Shop} />
+      <Route path="/cart" component={Cart} />
+      <Route path="/checkout" component={Checkout} />
       <Route path="/print-on-demand" component={PrintOnDemand} />
       <Route component={NotFound} />
     </Switch>

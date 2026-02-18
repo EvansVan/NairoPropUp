@@ -1,8 +1,10 @@
 import type { Express } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
-import { insertProductSchema, insertMeetingRequestSchema } from "@shared/schema";
+import { insertProductSchema, insertMeetingRequestSchema, insertOrderSchema } from "@shared/schema";
 import { sendMeetingConfirmation } from "./email";
+import { z } from "zod";
+import { getPaymentProvider } from "./lib/payment";
 
 export async function registerRoutes(app: Express): Promise<Server> {
 
@@ -50,6 +52,307 @@ export async function registerRoutes(app: Express): Promise<Server> {
       res.status(201).json(request);
     } catch (error) {
       res.status(400).json({ message: "Invalid meeting request data" });
+    }
+  });
+
+  // Cart routes (Phase 2)
+  app.get("/api/cart", async (req, res) => {
+    try {
+      const userId = (req as any).user?.id; // TODO: implement auth middleware
+      const cartToken = req.headers["x-cart-token"] as string | undefined;
+
+      const cart = await storage.getOrCreateCart(userId, cartToken);
+      const cartWithItems = await storage.getCartWithItems(cart.id);
+
+      if (!cartWithItems) {
+        return res.status(404).json({ message: "Cart not found" });
+      }
+
+      // Return cartToken for guest carts so client can store it
+      res.json({
+        ...cartWithItems,
+        cartToken: cart.cartToken,
+      });
+    } catch (error) {
+      res.status(500).json({ message: "Failed to get cart" });
+    }
+  });
+
+  app.post("/api/cart/items", async (req, res) => {
+    try {
+      const { productId, quantity } = z.object({
+        productId: z.string(),
+        quantity: z.number().int().positive(),
+      }).parse(req.body);
+
+      const userId = (req as any).user?.id;
+      const cartToken = req.headers["x-cart-token"] as string | undefined;
+
+      const cart = await storage.getOrCreateCart(userId, cartToken);
+      await storage.addCartItem(cart.id, productId, quantity);
+
+      const cartWithItems = await storage.getCartWithItems(cart.id);
+      if (!cartWithItems) {
+        return res.status(404).json({ message: "Cart not found" });
+      }
+
+      res.json({
+        ...cartWithItems,
+        cartToken: cart.cartToken,
+      });
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ message: "Invalid request data", errors: error.errors });
+      }
+      res.status(500).json({ message: "Failed to add item to cart" });
+    }
+  });
+
+  app.patch("/api/cart/items/:itemId", async (req, res) => {
+    try {
+      const { itemId } = req.params;
+      const { quantity } = z.object({
+        quantity: z.number().int().min(0),
+      }).parse(req.body);
+
+      const updatedItem = await storage.updateCartItem(itemId, quantity);
+
+      if (!updatedItem && quantity === 0) {
+        return res.json({ message: "Item removed" });
+      }
+
+      if (!updatedItem) {
+        return res.status(404).json({ message: "Cart item not found" });
+      }
+
+      res.json(updatedItem);
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ message: "Invalid request data", errors: error.errors });
+      }
+      res.status(500).json({ message: "Failed to update cart item" });
+    }
+  });
+
+  app.delete("/api/cart/items/:itemId", async (req, res) => {
+    try {
+      const { itemId } = req.params;
+      await storage.removeCartItem(itemId);
+      res.json({ message: "Item removed from cart" });
+    } catch (error) {
+      res.status(500).json({ message: "Failed to remove cart item" });
+    }
+  });
+
+  // Order/Checkout routes (Phase 2)
+  app.post("/api/checkout", async (req, res) => {
+    try {
+      const userId = (req as any).user?.id;
+      const cartToken = req.headers["x-cart-token"] as string | undefined;
+
+      // Get cart with items
+      const cart = await storage.getOrCreateCart(userId, cartToken);
+      const cartWithItems = await storage.getCartWithItems(cart.id);
+
+      if (!cartWithItems || cartWithItems.items.length === 0) {
+        return res.status(400).json({ message: "Cart is empty" });
+      }
+
+      // Calculate totals
+      const subtotal = cartWithItems.items.reduce(
+        (sum, item) => sum + parseFloat(item.unitPriceSnapshot) * item.quantity,
+        0
+      );
+      const shippingFee = 10.0; // Fixed shipping for now
+      const taxTotal = subtotal * 0.1; // 10% tax
+      const total = subtotal + shippingFee + taxTotal;
+
+      // Validate checkout data
+      const checkoutData = z.object({
+        shippingAddress: z.string().optional(),
+        customerEmail: z.string().email().optional(),
+        customerName: z.string().optional(),
+      }).parse(req.body);
+
+      // Create order
+      const orderData = {
+        userId: userId || null,
+        status: "PENDING",
+        subtotal: subtotal.toString(),
+        discountTotal: "0",
+        taxTotal: taxTotal.toString(),
+        shippingFee: shippingFee.toString(),
+        total: total.toString(),
+        currency: "KES",
+        paymentStatus: "PENDING",
+        paymentProvider: null,
+        shippingAddress: checkoutData.shippingAddress || null,
+        customerEmail: checkoutData.customerEmail || null,
+        customerName: checkoutData.customerName || null,
+        items: cartWithItems.items.map((item) => ({
+          productId: item.productId,
+          nameSnapshot: item.product.name,
+          priceSnapshot: item.unitPriceSnapshot,
+          quantity: item.quantity,
+          total: (parseFloat(item.unitPriceSnapshot) * item.quantity).toString(),
+        })),
+      };
+
+      const order = await storage.createOrder(orderData);
+
+      // Clear cart after successful order creation
+      await storage.clearCart(cart.id);
+
+      // Get full order with items
+      const fullOrder = await storage.getOrder(order.id);
+      if (!fullOrder) {
+        return res.status(500).json({ message: "Failed to retrieve order" });
+      }
+
+      res.status(201).json(fullOrder);
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ message: "Invalid checkout data", errors: error.errors });
+      }
+      console.error("Checkout error:", error);
+      res.status(500).json({ message: "Failed to create order" });
+    }
+  });
+
+  app.get("/api/orders/:orderId", async (req, res) => {
+    try {
+      const { orderId } = req.params;
+      const order = await storage.getOrder(orderId);
+
+      if (!order) {
+        return res.status(404).json({ message: "Order not found" });
+      }
+
+      res.json(order);
+    } catch (error) {
+      res.status(500).json({ message: "Failed to get order" });
+    }
+  });
+
+  app.get("/api/orders", async (req, res) => {
+    try {
+      const userId = (req as any).user?.id;
+      if (!userId) {
+        return res.status(401).json({ message: "Authentication required" });
+      }
+
+      const userOrders = await storage.getUserOrders(userId);
+      res.json(userOrders);
+    } catch (error) {
+      res.status(500).json({ message: "Failed to get orders" });
+    }
+  });
+
+  // Payment routes (Phase 3)
+  app.post("/api/payments/initiate", async (req, res) => {
+    try {
+      const { orderId, provider, options } = z.object({
+        orderId: z.string(),
+        provider: z.enum(["STRIPE", "MPESA"]),
+        options: z.record(z.any()).optional(),
+      }).parse(req.body);
+
+      const order = await storage.getOrder(orderId);
+      if (!order) {
+        return res.status(404).json({ message: "Order not found" });
+      }
+
+      if (order.paymentStatus === "PAID") {
+        return res.status(400).json({ message: "Order already paid" });
+      }
+
+      // Get payment provider
+      const paymentProvider = getPaymentProvider(provider);
+
+      // Initiate payment
+      const paymentResult = await paymentProvider.initiatePayment(order, options || {});
+
+      // Create payment record
+      const payment = await storage.createPayment({
+        orderId: order.id,
+        provider: paymentResult.provider,
+        providerPaymentId: paymentResult.providerPaymentId,
+        amount: order.total,
+        currency: order.currency,
+        status: "PENDING",
+        rawResponse: JSON.stringify(paymentResult),
+      });
+
+      // Update order with payment provider
+      await storage.updateOrderPaymentStatus(order.id, "REQUIRES_ACTION", provider);
+
+      res.json({
+        paymentId: payment.id,
+        ...paymentResult,
+      });
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ message: "Invalid payment data", errors: error.errors });
+      }
+      console.error("Payment initiation error:", error);
+      res.status(500).json({ message: error instanceof Error ? error.message : "Failed to initiate payment" });
+    }
+  });
+
+  // Webhook routes
+  app.post("/api/webhooks/stripe", async (req, res) => {
+    try {
+      const paymentProvider = getPaymentProvider("STRIPE");
+      const result = await paymentProvider.handleWebhook(req.body, req.headers as Record<string, string>);
+
+      if (result.success && result.orderId && result.paymentId) {
+        // Find payment by provider payment ID
+        const payment = await storage.getPaymentByProviderId("STRIPE", result.paymentId);
+        if (payment) {
+          await storage.updatePaymentStatus(payment.id, "SUCCESS", req.body);
+          await storage.updateOrderPaymentStatus(payment.orderId, "PAID", "STRIPE");
+          await storage.updateOrderStatus(payment.orderId, "PAID");
+        }
+      } else if (!result.success && result.orderId && result.paymentId) {
+        const payment = await storage.getPaymentByProviderId("STRIPE", result.paymentId);
+        if (payment) {
+          await storage.updatePaymentStatus(payment.id, "FAILED", req.body);
+          await storage.updateOrderPaymentStatus(payment.orderId, "FAILED", "STRIPE");
+        }
+      }
+
+      res.json({ received: true });
+    } catch (error) {
+      console.error("Stripe webhook error:", error);
+      res.status(400).json({ message: "Webhook processing failed" });
+    }
+  });
+
+  app.post("/api/webhooks/mpesa", async (req, res) => {
+    try {
+      const paymentProvider = getPaymentProvider("MPESA");
+      const result = await paymentProvider.handleWebhook(req.body, req.headers as Record<string, string>);
+
+      if (result.success && result.paymentId) {
+        // Find payment by CheckoutRequestID
+        const payment = await storage.getPaymentByProviderId("MPESA", result.paymentId);
+        if (payment) {
+          await storage.updatePaymentStatus(payment.id, "SUCCESS", req.body);
+          await storage.updateOrderPaymentStatus(payment.orderId, "PAID", "MPESA");
+          await storage.updateOrderStatus(payment.orderId, "PAID");
+        }
+      } else if (!result.success && result.paymentId) {
+        const payment = await storage.getPaymentByProviderId("MPESA", result.paymentId);
+        if (payment) {
+          await storage.updatePaymentStatus(payment.id, "FAILED", req.body);
+          await storage.updateOrderPaymentStatus(payment.orderId, "FAILED", "MPESA");
+        }
+      }
+
+      res.json({ ResultCode: 0, ResultDesc: "Accepted" });
+    } catch (error) {
+      console.error("M-Pesa webhook error:", error);
+      res.status(400).json({ ResultCode: 1, ResultDesc: "Failed" });
     }
   });
 

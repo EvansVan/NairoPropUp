@@ -1,11 +1,14 @@
 import { useState } from "react";
 import { Link, useLocation } from "wouter";
-import { Menu, X } from "lucide-react";
+import { Menu, X, ShoppingCart } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { useCart } from "@/hooks/useCart";
 
 export default function Header() {
   const [location, setLocation] = useLocation();
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const { cart } = useCart();
+  const itemCount = cart?.items.reduce((sum, item) => sum + item.quantity, 0) || 0;
 
   const navItems = [
     { label: "Home", href: "/" },
@@ -85,6 +88,21 @@ export default function Header() {
                 Shop
               </Button>
             </Link>
+            <Link href="/cart">
+              <Button
+                variant="ghost"
+                size="sm"
+                className="relative"
+                data-testid="button-cart"
+              >
+                <ShoppingCart className="h-5 w-5" />
+                {itemCount > 0 && (
+                  <span className="absolute -top-1 -right-1 bg-primary text-primary-foreground text-xs rounded-full h-5 w-5 flex items-center justify-center">
+                    {itemCount > 9 ? "9+" : itemCount}
+                  </span>
+                )}
+              </Button>
+            </Link>
           </nav>
 
           <button
@@ -120,6 +138,21 @@ export default function Header() {
                 data-testid="button-mobile-shop"
               >
                 Shop
+              </Button>
+            </Link>
+            <Link href="/cart">
+              <Button
+                variant="ghost"
+                className="w-full justify-start relative"
+                data-testid="button-mobile-cart"
+              >
+                <ShoppingCart className="h-5 w-5 mr-2" />
+                Cart
+                {itemCount > 0 && (
+                  <span className="ml-auto bg-primary text-primary-foreground text-xs rounded-full h-5 w-5 flex items-center justify-center">
+                    {itemCount > 9 ? "9+" : itemCount}
+                  </span>
+                )}
               </Button>
             </Link>
           </div>
