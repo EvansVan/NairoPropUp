@@ -5,8 +5,131 @@ import { insertProductSchema, insertMeetingRequestSchema, insertOrderSchema } fr
 import { sendMeetingConfirmation } from "./email";
 import { z } from "zod";
 import { getPaymentProvider } from "./lib/payment";
+import { hashPassword, verifyPassword } from "./lib/auth";
 
 export async function registerRoutes(app: Express): Promise<Server> {
+
+  // Auth: register
+  app.post("/api/register", async (req, res) => {
+    try {
+      const data = z.object({ username: z.string().min(3), password: z.string().min(6) }).parse(req.body);
+
+      const existing = await storage.getUserByUsername(data.username);
+      if (existing) return res.status(409).json({ message: "Username already taken" });
+
+      const hashed = hashPassword(data.password);
+      const user = await storage.createUser({ username: data.username, password: hashed });
+
+      // create session
+      (req as any).session.userId = user.id;
+
+      const { password, ...safe } = user as any;
+      res.status(201).json(safe);
+    } catch (error) {
+      if (error instanceof z.ZodError) return res.status(400).json({ message: "Invalid data", errors: error.errors });
+      console.error("Register error:", error);
+      res.status(500).json({ message: "Registration failed" });
+    }
+  });
+
+  // Auth: login
+  app.post("/api/login", async (req, res) => {
+    try {
+      const data = z.object({ username: z.string(), password: z.string() }).parse(req.body);
+      const user = await storage.getUserByUsername(data.username);
+      if (!user) return res.status(401).json({ message: "Invalid credentials" });
+
+      const ok = verifyPassword(data.password, (user as any).password);
+      if (!ok) return res.status(401).json({ message: "Invalid credentials" });
+
+      (req as any).session.userId = user.id;
+      const { password, ...safe } = user as any;
+      res.json(safe);
+    } catch (error) {
+      if (error instanceof z.ZodError) return res.status(400).json({ message: "Invalid data", errors: error.errors });
+      console.error("Login error:", error);
+      res.status(500).json({ message: "Login failed" });
+    }
+  });
+
+  // Auth: profile
+  app.get("/api/profile", async (req, res) => {
+    try {
+      const user = (req as any).user;
+      if (!user) return res.status(401).json({ message: "Not authenticated" });
+      res.json(user);
+    } catch (error) {
+      res.status(500).json({ message: "Failed to get profile" });
+    }
+  });
+
+  // Auth: update profile
+  app.patch("/api/profile", async (req, res) => {
+    try {
+      const sessionUserId = (req as any).session?.userId as string | undefined;
+      if (!sessionUserId) return res.status(401).json({ message: "Not authenticated" });
+
+      const data = z.object({
+        username: z.string().min(3).optional(),
+        currentPassword: z.string().optional(),
+        newPassword: z.string().min(6).optional(),
+      }).parse(req.body);
+
+      const existingUser = await storage.getUser(sessionUserId);
+      if (!existingUser) return res.status(404).json({ message: "User not found" });
+
+      const updates: Partial<{ username: string; password: string }> = {};
+
+      if (data.username && data.username !== existingUser.username) {
+        const taken = await storage.getUserByUsername(data.username);
+        if (taken && taken.id !== existingUser.id) {
+          return res.status(409).json({ message: "Username already taken" });
+        }
+        updates.username = data.username;
+      }
+
+      if (data.newPassword) {
+        if (!data.currentPassword) {
+          return res.status(400).json({ message: "Current password is required" });
+        }
+        const ok = verifyPassword(data.currentPassword, existingUser.password);
+        if (!ok) {
+          return res.status(401).json({ message: "Current password is incorrect" });
+        }
+        updates.password = hashPassword(data.newPassword);
+      }
+
+      if (!updates.username && !updates.password) {
+        const { password, ...safeExisting } = existingUser;
+        return res.json(safeExisting);
+      }
+
+      const updated = await storage.updateUser(existingUser.id, updates);
+      if (!updated) return res.status(500).json({ message: "Failed to update profile" });
+
+      const { password, ...safe } = updated;
+      res.json(safe);
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ message: "Invalid data", errors: error.errors });
+      }
+      console.error("Profile update error:", error);
+      res.status(500).json({ message: "Failed to update profile" });
+    }
+  });
+
+  // Auth: logout
+  app.post("/api/logout", (req, res) => {
+    try {
+      (req as any).session.destroy((err: any) => {
+        if (err) return res.status(500).json({ message: "Logout failed" });
+        res.json({ message: "Logged out" });
+      });
+    } catch (error) {
+      res.status(500).json({ message: "Logout failed" });
+    }
+  });
+
 
   app.get("/api/products", async (req, res) => {
     const products = await storage.getProducts();

@@ -3,17 +3,17 @@ import type { Transporter } from "nodemailer";
 
 let transporter: Transporter | null = null;
 
-function getTransporter(): Transporter {
+function getTransporter(): Transporter | null {
   if (!transporter) {
     const emailUser = process.env.EMAIL_USER;
     const emailPassword = process.env.EMAIL_PASSWORD;
 
     if (!emailUser || !emailPassword) {
       console.warn("EMAIL_USER or EMAIL_PASSWORD not set - email functionality will be disabled");
-      return null as any;
+      return null;
     }
 
-    transporter = nodemailer.createTransporter({
+    transporter = nodemailer.createTransport({
       host: "smtp.gmail.com",
       port: 587,
       secure: false,

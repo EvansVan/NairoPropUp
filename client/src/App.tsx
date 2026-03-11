@@ -10,11 +10,17 @@ import Cart from "@/pages/Cart";
 import Checkout from "@/pages/Checkout";
 import PrintOnDemand from "@/pages/PrintOnDemand";
 import NotFound from "@/pages/not-found";
+import Login from "@/pages/Login";
+import Register from "@/pages/Register";
+import Account from "@/pages/Account";
 
 function AppRoutes() {
   return (
     <Switch>
       <Route path="/" component={Home} />
+      <Route path="/login" component={Login} />
+      <Route path="/register" component={Register} />
+      <Route path="/account" component={Account} />
       <Route path="/shop" component={Shop} />
       <Route path="/cart" component={Cart} />
       <Route path="/checkout" component={Checkout} />

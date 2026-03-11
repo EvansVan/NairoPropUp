@@ -7,7 +7,14 @@ vite.config.ts.*
 .replit
 .env
 .local
+*.md
+!README.md
+!ReadMe.md
 design_guidelines.md
+.github/copilot-instructions.md
+
+# Local utility scripts
+scripts/
 
 # Additional files to exclude
 *.log

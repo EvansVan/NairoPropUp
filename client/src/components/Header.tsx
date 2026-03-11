@@ -1,14 +1,28 @@
 import { useState } from "react";
 import { Link, useLocation } from "wouter";
-import { Menu, X, ShoppingCart } from "lucide-react";
+import { Menu, X, ShoppingCart, LogIn, UserPlus, LogOut, User, Settings } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useCart } from "@/hooks/useCart";
+import { useAuth } from "@/hooks/useAuth";
+import { useToast } from "@/hooks/use-toast";
 
 export default function Header() {
   const [location, setLocation] = useLocation();
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const { cart } = useCart();
+  const { user, isAuthenticated, logout } = useAuth();
+  const { toast } = useToast();
   const itemCount = cart?.items.reduce((sum, item) => sum + item.quantity, 0) || 0;
+
+  const handleLogout = async () => {
+    try {
+      await logout.mutateAsync();
+      toast({ title: "Logged out", description: "See you soon!" });
+      setLocation("/");
+    } catch {
+      toast({ title: "Logout failed", variant: "destructive" });
+    }
+  };
 
   const navItems = [
     { label: "Home", href: "/" },
@@ -88,6 +102,46 @@ export default function Header() {
                 Shop
               </Button>
             </Link>
+
+            {isAuthenticated ? (
+              <>
+                <Link href="/account">
+                  <Button variant="ghost" size="sm" data-testid="button-account">
+                    <Settings className="h-4 w-4 mr-1" />
+                    Account
+                  </Button>
+                </Link>
+                <span className="text-sm text-muted-foreground flex items-center gap-1">
+                  <User className="h-4 w-4" />
+                  {user?.username}
+                </span>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={handleLogout}
+                  disabled={logout.isPending}
+                  data-testid="button-logout"
+                >
+                  <LogOut className="h-4 w-4 mr-1" />
+                  Logout
+                </Button>
+              </>
+            ) : (
+              <>
+                <Link href="/login">
+                  <Button variant="ghost" size="sm" data-testid="button-login">
+                    <LogIn className="h-4 w-4 mr-1" />
+                    Login
+                  </Button>
+                </Link>
+                <Link href="/register">
+                  <Button variant="ghost" size="sm" data-testid="button-register">
+                    <UserPlus className="h-4 w-4 mr-1" />
+                    Register
+                  </Button>
+                </Link>
+              </>
+            )}
             <Link href="/cart">
               <Button
                 variant="ghost"
@@ -155,6 +209,41 @@ export default function Header() {
                 )}
               </Button>
             </Link>
+            {isAuthenticated ? (
+              <>
+                <Link href="/account">
+                  <Button variant="ghost" className="w-full justify-start" data-testid="button-mobile-account">
+                    <Settings className="h-4 w-4 mr-2" />
+                    My Account
+                  </Button>
+                </Link>
+                <Button
+                  variant="ghost"
+                  className="w-full justify-start"
+                  onClick={handleLogout}
+                  disabled={logout.isPending}
+                  data-testid="button-mobile-logout"
+                >
+                  <LogOut className="h-4 w-4 mr-2" />
+                  Logout ({user?.username})
+                </Button>
+              </>
+            ) : (
+              <>
+                <Link href="/login">
+                  <Button variant="ghost" className="w-full justify-start" data-testid="button-mobile-login">
+                    <LogIn className="h-4 w-4 mr-2" />
+                    Login
+                  </Button>
+                </Link>
+                <Link href="/register">
+                  <Button variant="ghost" className="w-full justify-start" data-testid="button-mobile-register">
+                    <UserPlus className="h-4 w-4 mr-2" />
+                    Register
+                  </Button>
+                </Link>
+              </>
+            )}
           </div>
         )}
       </div>

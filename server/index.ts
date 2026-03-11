@@ -1,10 +1,46 @@
 import express, { type Request, Response, NextFunction } from "express";
+import session from "express-session";
+import createMemoryStore from "memorystore";
 import { registerRoutes } from "./routes";
 import { setupVite, serveStatic, log } from "./vite";
+import { storage } from "./storage";
+
+const MemoryStore = createMemoryStore(session);
 
 const app = express();
 app.use(express.json());
 app.use(express.urlencoded({ extended: false }));
+
+// Session middleware for authentication
+app.use(
+  session({
+    store: new MemoryStore({ checkPeriod: 86400000 }),
+    secret: process.env.SESSION_SECRET || "dev-session-secret",
+    resave: false,
+    saveUninitialized: false,
+    cookie: {
+      maxAge: 1000 * 60 * 60 * 24 * 7, // 7 days
+    },
+  })
+);
+
+// Attach user to request when session contains a user id
+app.use(async (req: any, _res, next) => {
+  try {
+    const userId = req.session?.userId as string | undefined;
+    if (userId) {
+      const user = await storage.getUser(userId);
+      if (user) {
+        // Do not expose password on req.user
+        const { password, ...safe } = (user as any) || {};
+        req.user = safe;
+      }
+    }
+  } catch (err) {
+    // ignore errors attaching user
+  }
+  next();
+});
 
 app.use((req, res, next) => {
   const start = Date.now();

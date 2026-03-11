@@ -23,6 +23,7 @@ export interface IStorage {
   getUser(id: string): Promise<User | undefined>;
   getUserByUsername(username: string): Promise<User | undefined>;
   createUser(user: InsertUser): Promise<User>;
+  updateUser(id: string, data: Partial<Pick<User, "username" | "password">>): Promise<User | undefined>;
 
   getProducts(): Promise<Product[]>;
   getProduct(id: string): Promise<Product | undefined>;
@@ -71,6 +72,15 @@ export class DbStorage implements IStorage {
 
   async createUser(insertUser: InsertUser): Promise<User> {
     const result = await this.db.insert(users).values(insertUser).returning();
+    return result[0];
+  }
+
+  async updateUser(id: string, data: Partial<Pick<User, "username" | "password">>): Promise<User | undefined> {
+    const result = await this.db
+      .update(users)
+      .set(data)
+      .where(eq(users.id, id))
+      .returning();
     return result[0];
   }
 
@@ -424,6 +434,17 @@ export class MemStorage implements IStorage {
     return user;
   }
 
+  async updateUser(id: string, data: Partial<Pick<User, "username" | "password">>): Promise<User | undefined> {
+    const existing = this.users.get(id);
+    if (!existing) return undefined;
+    const updated: User = {
+      ...existing,
+      ...data,
+    };
+    this.users.set(id, updated);
+    return updated;
+  }
+
   async getProducts(): Promise<Product[]> {
     return Array.from(this.products.values());
   }
@@ -642,7 +663,13 @@ export class MemStorage implements IStorage {
     const id = randomUUID();
     const payment: Payment = {
       id,
-      ...paymentData,
+      orderId: paymentData.orderId,
+      provider: paymentData.provider,
+      providerPaymentId: paymentData.providerPaymentId ?? null,
+      amount: paymentData.amount,
+      currency: paymentData.currency ?? "KES",
+      status: paymentData.status ?? "PENDING",
+      rawResponse: paymentData.rawResponse ?? null,
       createdAt: new Date(),
       updatedAt: new Date(),
     };
