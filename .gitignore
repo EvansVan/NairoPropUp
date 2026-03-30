@@ -15,6 +15,7 @@ design_guidelines.md
 
 # Local utility scripts
 scripts/
+docs/
 
 # Additional files to exclude
 *.log

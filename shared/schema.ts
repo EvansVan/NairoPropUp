@@ -13,10 +13,13 @@ export const users = pgTable("users", {
 export const products = pgTable("products", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
   name: text("name").notNull(),
+  slug: varchar("slug").notNull().unique(),
   description: text("description").notNull(),
   price: decimal("price", { precision: 10, scale: 2 }).notNull(),
   imageUrl: text("image_url").notNull(),
   category: text("category").notNull(),
+  categorySlug: text("category_slug").notNull(),
+  tags: text("tags").array().notNull().default(sql`ARRAY[]::text[]`),
 });
 
 export const meetingRequests = pgTable("meeting_requests", {

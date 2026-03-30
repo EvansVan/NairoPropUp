@@ -15,9 +15,62 @@ import {
   type InsertPayment,
 } from "@shared/schema";
 import { randomUUID } from "crypto";
-import { eq, and } from "drizzle-orm";
+import { eq, and, ilike, or, sql } from "drizzle-orm";
 import { carts, cartItems, orders, orderItems, products, users, meetingRequests, payments } from "@shared/schema";
 import { getDb, hasDatabase } from "./db";
+import { slugify } from "./lib/slug";
+
+export type ProductFilters = {
+  categorySlug?: string;
+  tags?: string[];
+  search?: string;
+};
+
+const hasFilters = (filters?: ProductFilters) =>
+  Boolean(
+    filters && (
+      (filters.categorySlug && filters.categorySlug.length > 0) ||
+      (filters.tags && filters.tags.length > 0) ||
+      (filters.search && filters.search.length > 0)
+    ),
+  );
+
+const matchesProductFilters = (product: Product, filters?: ProductFilters) => {
+  if (!hasFilters(filters)) return true;
+
+  if (filters?.categorySlug && product.categorySlug !== filters.categorySlug) {
+    return false;
+  }
+
+  if (filters?.tags?.length) {
+    const productTags = new Set(product.tags);
+    const tagMatch = filters.tags.some((tag) => productTags.has(tag));
+    if (!tagMatch) return false;
+  }
+
+  if (filters?.search) {
+    const haystack = `${product.name} ${product.description}`.toLowerCase();
+    if (!haystack.includes(filters.search.toLowerCase())) {
+      return false;
+    }
+  }
+
+  return true;
+};
+
+const normalizeTags = (tags?: string[] | null) =>
+  (tags ?? [])
+    .map((tag) => slugify(tag))
+    .filter((tag) => tag.length > 0);
+
+const normalizeProductInput = (
+  product: InsertProduct,
+): InsertProduct & { slug: string; categorySlug: string; tags: string[] } => ({
+  ...product,
+  slug: product.slug ? slugify(product.slug) : slugify(product.name),
+  categorySlug: product.categorySlug ? slugify(product.categorySlug) : slugify(product.category),
+  tags: normalizeTags(product.tags),
+});
 
 export interface IStorage {
   getUser(id: string): Promise<User | undefined>;
@@ -25,8 +78,9 @@ export interface IStorage {
   createUser(user: InsertUser): Promise<User>;
   updateUser(id: string, data: Partial<Pick<User, "username" | "password">>): Promise<User | undefined>;
 
-  getProducts(): Promise<Product[]>;
+  getProducts(filters?: ProductFilters): Promise<Product[]>;
   getProduct(id: string): Promise<Product | undefined>;
+  getProductBySlug(slug: string): Promise<Product | undefined>;
   createProduct(product: InsertProduct): Promise<Product>;
 
   createMeetingRequest(request: InsertMeetingRequest): Promise<MeetingRequest>;
@@ -39,6 +93,7 @@ export interface IStorage {
   updateCartItem(itemId: string, quantity: number): Promise<CartItem | undefined>;
   removeCartItem(itemId: string): Promise<void>;
   clearCart(cartId: string): Promise<void>;
+  mergeGuestCartToUser(userId: string, cartToken: string): Promise<Cart & { items: CartItem[] }>;
 
   // Order methods
   createOrder(orderData: InsertOrder): Promise<Order>;
@@ -84,8 +139,36 @@ export class DbStorage implements IStorage {
     return result[0];
   }
 
-  async getProducts(): Promise<Product[]> {
-    return this.db.select().from(products);
+  async getProducts(filters?: ProductFilters): Promise<Product[]> {
+    if (!hasFilters(filters)) {
+      return this.db.select().from(products);
+    }
+
+    const whereClauses = [] as any[];
+
+    if (filters?.categorySlug) {
+      whereClauses.push(eq(products.categorySlug, filters.categorySlug));
+    }
+
+    if (filters?.tags?.length) {
+      whereClauses.push(sql`${products.tags} && ${filters.tags}`);
+    }
+
+    if (filters?.search) {
+      const likeTerm = `%${filters.search}%`;
+      whereClauses.push(or(ilike(products.name, likeTerm), ilike(products.description, likeTerm)));
+    }
+
+    const query = this.db.select().from(products);
+    if (!whereClauses.length) {
+      return query;
+    }
+
+    if (whereClauses.length === 1) {
+      return query.where(whereClauses[0]);
+    }
+
+    return query.where(and(...whereClauses));
   }
 
   async getProduct(id: string): Promise<Product | undefined> {
@@ -93,8 +176,14 @@ export class DbStorage implements IStorage {
     return result[0];
   }
 
+  async getProductBySlug(slug: string): Promise<Product | undefined> {
+    const result = await this.db.select().from(products).where(eq(products.slug, slug)).limit(1);
+    return result[0];
+  }
+
   async createProduct(insertProduct: InsertProduct): Promise<Product> {
-    const result = await this.db.insert(products).values(insertProduct).returning();
+    const payload = normalizeProductInput(insertProduct);
+    const result = await this.db.insert(products).values(payload).returning();
     return result[0];
   }
 
@@ -198,6 +287,60 @@ export class DbStorage implements IStorage {
 
   async clearCart(cartId: string): Promise<void> {
     await this.db.delete(cartItems).where(eq(cartItems.cartId, cartId));
+  }
+
+  async mergeGuestCartToUser(userId: string, cartToken: string): Promise<Cart & { items: CartItem[] }> {
+    // Get user cart (create if doesn't exist)
+    let userCart = await this.db.select().from(carts).where(eq(carts.userId, userId)).limit(1);
+    if (!userCart[0]) {
+      const result = await this.db.insert(carts).values({ userId }).returning();
+      userCart = result;
+    }
+    const userCartId = userCart[0].id;
+
+    // Get guest cart
+    const guestCartQuery = await this.db.select().from(carts).where(eq(carts.cartToken, cartToken)).limit(1);
+    if (!guestCartQuery[0]) {
+      // No guest cart to merge, just return user cart with items
+      const items = await this.db.select().from(cartItems).where(eq(cartItems.cartId, userCartId));
+      return { ...userCart[0], items };
+    }
+
+    const guestCartId = guestCartQuery[0].id;
+
+    // Get all guest cart items
+    const guestItems = await this.db.select().from(cartItems).where(eq(cartItems.cartId, guestCartId));
+
+    // Move/merge guest items to user cart
+    for (const guestItem of guestItems) {
+      // Check if user cart already has this product
+      const existingUserItem = await this.db
+        .select()
+        .from(cartItems)
+        .where(and(eq(cartItems.cartId, userCartId), eq(cartItems.productId, guestItem.productId)))
+        .limit(1);
+
+      if (existingUserItem[0]) {
+        // Update quantity
+        await this.db
+          .update(cartItems)
+          .set({ quantity: existingUserItem[0].quantity + guestItem.quantity })
+          .where(eq(cartItems.id, existingUserItem[0].id));
+      } else {
+        // Move item (update cartId)
+        await this.db
+          .update(cartItems)
+          .set({ cartId: userCartId })
+          .where(eq(cartItems.id, guestItem.id));
+      }
+    }
+
+    // Delete guest cart
+    await this.db.delete(carts).where(eq(carts.id, guestCartId));
+
+    // Return merged user cart with all items
+    const mergedItems = await this.db.select().from(cartItems).where(eq(cartItems.cartId, userCartId));
+    return { ...userCart[0], items: mergedItems };
   }
 
   // Order methods
@@ -335,7 +478,7 @@ export class MemStorage implements IStorage {
     this.payments = new Map();
 
     // Seed initial demo products so the shop has real data in Phase 1
-    const seedProducts: Omit<Product, "id">[] = [
+    const rawSeedProducts: Array<Omit<Product, "id" | "slug" | "categorySlug" | "tags"> & { tags: string[] }> = [
       {
         name: "Cyberpunk Helmet Prop",
         description:
@@ -344,6 +487,7 @@ export class MemStorage implements IStorage {
         imageUrl:
           "https://images.unsplash.com/photo-1614680376573-df3480f0c6ff?w=500&h=500&fit=crop",
         category: "Props",
+        tags: ["featured", "wearable", "led-effects"],
       },
       {
         name: "Fantasy Sword Replica",
@@ -353,6 +497,7 @@ export class MemStorage implements IStorage {
         imageUrl:
           "https://images.unsplash.com/photo-1609840114035-3c981c7fec2d?w=500&h=500&fit=crop",
         category: "Weapons",
+        tags: ["handmade", "display-ready"],
       },
       {
         name: "Sci-Fi Gauntlet",
@@ -362,6 +507,7 @@ export class MemStorage implements IStorage {
         imageUrl:
           "https://images.unsplash.com/photo-1558618666-fcd25c85cd64?w=500&h=500&fit=crop",
         category: "Armor",
+        tags: ["wearable", "premium", "electronics"],
       },
       {
         name: "Dragon Figurine",
@@ -371,6 +517,7 @@ export class MemStorage implements IStorage {
         imageUrl:
           "https://images.unsplash.com/photo-1578321272176-b7bbc0679853?w=500&h=500&fit=crop",
         category: "Miniatures",
+        tags: ["collectible", "hand-painted"],
       },
       {
         name: "Steampunk Goggles",
@@ -380,6 +527,7 @@ export class MemStorage implements IStorage {
         imageUrl:
           "https://images.unsplash.com/photo-1509048191080-d2984bad6ae5?w=500&h=500&fit=crop",
         category: "Accessories",
+        tags: ["wearable", "steampunk", "featured"],
       },
       {
         name: "Wizard Staff Prop",
@@ -389,6 +537,7 @@ export class MemStorage implements IStorage {
         imageUrl:
           "https://images.unsplash.com/photo-1578632292335-df3abbb0d586?w=500&h=500&fit=crop",
         category: "Props",
+        tags: ["cosplay", "premium", "led-effects"],
       },
       {
         name: "Space Marine Shoulder Pad",
@@ -398,6 +547,7 @@ export class MemStorage implements IStorage {
         imageUrl:
           "https://images.unsplash.com/photo-1558618666-fcd25c85cd64?w=500&h=500&fit=crop",
         category: "Armor",
+        tags: ["wearable", "battle-ready"],
       },
       {
         name: "Medieval Shield",
@@ -407,8 +557,16 @@ export class MemStorage implements IStorage {
         imageUrl:
           "https://images.unsplash.com/photo-1589578527966-fdac0f44566c?w=500&h=500&fit=crop",
         category: "Props",
+        tags: ["handmade", "display-ready"],
       },
     ];
+
+    const seedProducts: Omit<Product, "id">[] = rawSeedProducts.map((seed) => ({
+      ...seed,
+      slug: slugify(seed.name),
+      categorySlug: slugify(seed.category),
+      tags: normalizeTags(seed.tags),
+    }));
 
     for (const seed of seedProducts) {
       const id = randomUUID();
@@ -445,17 +603,24 @@ export class MemStorage implements IStorage {
     return updated;
   }
 
-  async getProducts(): Promise<Product[]> {
-    return Array.from(this.products.values());
+  async getProducts(filters?: ProductFilters): Promise<Product[]> {
+    const all = Array.from(this.products.values());
+    if (!hasFilters(filters)) return all;
+    return all.filter((product) => matchesProductFilters(product, filters));
   }
 
   async getProduct(id: string): Promise<Product | undefined> {
     return this.products.get(id);
   }
 
+  async getProductBySlug(slug: string): Promise<Product | undefined> {
+    return Array.from(this.products.values()).find((product) => product.slug === slug);
+  }
+
   async createProduct(insertProduct: InsertProduct): Promise<Product> {
+    const payload = normalizeProductInput(insertProduct);
     const id = randomUUID();
-    const product: Product = { ...insertProduct, id };
+    const product: Product = { ...payload, id };
     this.products.set(id, product);
     return product;
   }
@@ -568,6 +733,63 @@ export class MemStorage implements IStorage {
       .filter((item) => item.cartId === cartId)
       .map((item) => item.id);
     itemsToDelete.forEach((id) => this.cartItems.delete(id));
+  }
+
+  async mergeGuestCartToUser(userId: string, cartToken: string): Promise<Cart & { items: CartItem[] }> {
+    // Get user cart (create if doesn't exist)
+    let userCart = Array.from(this.carts.values()).find((c) => c.userId === userId);
+    if (!userCart) {
+      const id = randomUUID();
+      userCart = {
+        id,
+        userId,
+        cartToken: null,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      };
+      this.carts.set(id, userCart);
+    }
+    const userCartId = userCart.id;
+
+    // Get guest cart
+    const guestCart = Array.from(this.carts.values()).find((c) => c.cartToken === cartToken);
+    if (!guestCart) {
+      // No guest cart to merge, just return user cart with items
+      const items = Array.from(this.cartItems.values()).filter((item) => item.cartId === userCartId);
+      return { ...userCart, items };
+    }
+
+    const guestCartId = guestCart.id;
+
+    // Get all guest cart items
+    const guestItems = Array.from(this.cartItems.values()).filter((item) => item.cartId === guestCartId);
+
+    // Move/merge guest items to user cart
+    for (const guestItem of guestItems) {
+      // Check if user cart already has this product
+      const existingUserItem = Array.from(this.cartItems.values()).find(
+        (item) => item.cartId === userCartId && item.productId === guestItem.productId
+      );
+
+      if (existingUserItem) {
+        // Update quantity
+        existingUserItem.quantity += guestItem.quantity;
+        this.cartItems.set(existingUserItem.id, existingUserItem);
+        // Delete duplicate guest item
+        this.cartItems.delete(guestItem.id);
+      } else {
+        // Move item (update cartId)
+        guestItem.cartId = userCartId;
+        this.cartItems.set(guestItem.id, guestItem);
+      }
+    }
+
+    // Delete guest cart
+    this.carts.delete(guestCartId);
+
+    // Return merged user cart with all items
+    const mergedItems = Array.from(this.cartItems.values()).filter((item) => item.cartId === userCartId);
+    return { ...userCart, items: mergedItems };
   }
 
   // Order methods

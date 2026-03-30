@@ -6,6 +6,7 @@ import { sendMeetingConfirmation } from "./email";
 import { z } from "zod";
 import { getPaymentProvider } from "./lib/payment";
 import { hashPassword, verifyPassword } from "./lib/auth";
+import { slugify } from "./lib/slug";
 
 export async function registerRoutes(app: Express): Promise<Server> {
 
@@ -132,8 +133,81 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
 
   app.get("/api/products", async (req, res) => {
-    const products = await storage.getProducts();
-    res.json(products);
+    try {
+      const categoryParam = typeof req.query.category === "string" ? req.query.category : undefined;
+      const searchParam = typeof req.query.q === "string" ? req.query.q :
+        (typeof req.query.search === "string" ? req.query.search : undefined);
+      const tagsParam = typeof req.query.tags === "string" ? req.query.tags : undefined;
+      const singleTagParam = typeof req.query.tag === "string" ? req.query.tag : undefined;
+
+      const tagList = [
+        ...(tagsParam ? tagsParam.split(",") : []),
+        ...(singleTagParam ? [singleTagParam] : []),
+      ]
+        .map((tag) => slugify(tag))
+        .filter((tag) => tag.length > 0);
+
+      const filters = {
+        categorySlug: categoryParam ? slugify(categoryParam) : undefined,
+        tags: tagList.length ? Array.from(new Set(tagList)) : undefined,
+        search: searchParam?.trim().length ? searchParam.trim() : undefined,
+      } as const;
+
+      const products = await storage.getProducts(filters);
+      res.json(products);
+    } catch (error) {
+      console.error("Failed to fetch products", error);
+      res.status(500).json({ message: "Failed to fetch products" });
+    }
+  });
+
+  app.get("/api/catalog/facets", async (_req, res) => {
+    try {
+      const catalog = await storage.getProducts();
+
+      const categoryMap = new Map<string, { name: string; slug: string; count: number }>();
+      const tagMap = new Map<string, { value: string; count: number }>();
+
+      catalog.forEach((product) => {
+        const categoryKey = product.categorySlug;
+        if (!categoryMap.has(categoryKey)) {
+          categoryMap.set(categoryKey, {
+            name: product.category,
+            slug: product.categorySlug,
+            count: 0,
+          });
+        }
+        categoryMap.get(categoryKey)!.count += 1;
+
+        product.tags.forEach((tag) => {
+          if (!tagMap.has(tag)) {
+            tagMap.set(tag, { value: tag, count: 0 });
+          }
+          tagMap.get(tag)!.count += 1;
+        });
+      });
+
+      res.json({
+        categories: Array.from(categoryMap.values()).sort((a, b) => b.count - a.count),
+        tags: Array.from(tagMap.values()).sort((a, b) => b.count - a.count),
+      });
+    } catch (error) {
+      console.error("Failed to build catalog facets", error);
+      res.status(500).json({ message: "Failed to build catalog facets" });
+    }
+  });
+
+  app.get("/api/products/slug/:slug", async (req, res) => {
+    try {
+      const normalizedSlug = slugify(req.params.slug);
+      const product = await storage.getProductBySlug(normalizedSlug);
+      if (!product) {
+        return res.status(404).json({ message: "Product not found" });
+      }
+      res.json(product);
+    } catch (error) {
+      res.status(500).json({ message: "Failed to fetch product" });
+    }
   });
 
   app.get("/api/products/:id", async (req, res) => {
@@ -146,7 +220,15 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   app.post("/api/products", async (req, res) => {
     try {
-      const validatedData = insertProductSchema.parse(req.body);
+      const normalizedPayload = {
+        ...req.body,
+        slug: req.body?.slug ?? slugify(req.body?.name ?? ""),
+        categorySlug: req.body?.categorySlug ?? slugify(req.body?.category ?? ""),
+        tags: Array.isArray(req.body?.tags)
+          ? req.body.tags.map((tag: string) => slugify(tag))
+          : req.body?.tags,
+      };
+      const validatedData = insertProductSchema.parse(normalizedPayload);
       const product = await storage.createProduct(validatedData);
       res.status(201).json(product);
     } catch (error) {
@@ -264,6 +346,26 @@ export async function registerRoutes(app: Express): Promise<Server> {
       res.json({ message: "Item removed from cart" });
     } catch (error) {
       res.status(500).json({ message: "Failed to remove cart item" });
+    }
+  });
+
+  app.post("/api/cart/merge", async (req, res) => {
+    try {
+      const userId = (req as any).user?.id;
+      const cartToken = req.headers["x-cart-token"] as string | undefined;
+
+      if (!userId || !cartToken) {
+        return res.status(400).json({ message: "Missing userId or cartToken" });
+      }
+
+      const mergedCart = await storage.mergeGuestCartToUser(userId, cartToken);
+      res.json({
+        ...mergedCart,
+        cartToken: null, // Guest token is no longer valid
+      });
+    } catch (error) {
+      console.error("Cart merge error:", error);
+      res.status(500).json({ message: "Failed to merge cart" });
     }
   });
 

@@ -21,16 +21,47 @@ export function useAuth() {
     retry: false,
   });
 
+  const mergeCartAfterAuth = async () => {
+    const cartToken = localStorage.getItem("cartToken");
+    if (cartToken) {
+      try {
+        const headers: Record<string, string> = {
+          "Content-Type": "application/json",
+          "x-cart-token": cartToken,
+        };
+        const res = await fetch("/api/cart/merge", {
+          method: "POST",
+          headers,
+          credentials: "include",
+        });
+        if (res.ok) {
+          // Clear guest cart token
+          localStorage.removeItem("cartToken");
+          // Invalidate cart query to fetch merged cart
+          queryClient.invalidateQueries({ queryKey: ["/api/cart"] });
+        }
+      } catch (error) {
+        console.error("Failed to merge cart:", error);
+      }
+    }
+  };
+
   const loginMutation = useMutation({
     mutationFn: (data: { username: string; password: string }) =>
       apiRequest("POST", "/api/login", data),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["/api/profile"] }),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["/api/profile"] });
+      await mergeCartAfterAuth();
+    },
   });
 
   const registerMutation = useMutation({
     mutationFn: (data: { username: string; password: string }) =>
       apiRequest("POST", "/api/register", data),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["/api/profile"] }),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["/api/profile"] });
+      await mergeCartAfterAuth();
+    },
   });
 
   const logoutMutation = useMutation({
